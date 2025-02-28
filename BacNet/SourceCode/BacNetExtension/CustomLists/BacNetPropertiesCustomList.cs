@@ -193,9 +193,9 @@ namespace BacNetExtension.CustomLists
             try
             {
                 _listName = data.ListName;
-                if (bool.TryParse(data.Properties["SubscribeCOV"], out bool subscribeCOV))
+                if (bool.TryParse(data.Properties["SubscribeCOV"], out bool subscribeCov))
                 {
-                    if (subscribeCOV)
+                    if (subscribeCov)
                     {
                         if (int.TryParse(data.Properties["Port"], out int tcpPort))
                         {
@@ -269,10 +269,12 @@ namespace BacNetExtension.CustomLists
 
                     if (newKey != null)
                     {
-                        var splitted = value.Value.Split(':');
-                        if (splitted.Length > 1)
+                       
+                        var propertyNameWithValue = value.Value.Split(':');
+                        if (propertyNameWithValue.Length > 1)
                         {
-                            itemElement.Add(newKey, splitted[1]);
+                            //propertyNameWithValue[0] is Name of property
+                            itemElement.Add(newKey, propertyNameWithValue[1]);
                             added.Add(value.Key);
                         }
                         else
