@@ -90,8 +90,7 @@ namespace BacNetExtension.CustomLists
                     }
                     else
                     {
-                        throw new ArgumentException(
-                            "Invalid port number. Please ensure that the port is a valid integer.");
+                        throw new ArgumentException("Invalid port number. Please ensure that the port is a valid integer.");
                     }
                 }
                 catch (Exception e)

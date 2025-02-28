@@ -5,6 +5,8 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO.BACnet;
 using System.Linq;
+using System.Threading.Tasks;
+using System.Timers;
 
 namespace BacNetExtension.CustomLists
 {
@@ -24,6 +26,7 @@ namespace BacNetExtension.CustomLists
 
         private BacnetClient _client;
         private Dictionary<string, string> _oldValues;
+        private string _listName;
 
         protected override CustomListDefinition GetDefinitionOverride()
         {
@@ -60,7 +63,8 @@ namespace BacNetExtension.CustomLists
                     new CustomListPropertyDefinition { Name = "Port", Value = "47808" },
                     new CustomListPropertyDefinition { Name = "Address", Value = "" },
                     new CustomListPropertyDefinition { Name = "ObjectName", Value = "" },
-                    new CustomListPropertyDefinition { Name = "ObjectInstance", Value = "" }
+                    new CustomListPropertyDefinition { Name = "ObjectInstance", Value = "" },
+                    new CustomListPropertyDefinition { Name = "SubscribeCOV", Value = "True" }
                 },
             };
         }
@@ -69,7 +73,7 @@ namespace BacNetExtension.CustomLists
             try
             {
                 int tcpPort = int.Parse(data.Properties["Port"]);
-                BacnetAddress adddress = new BacnetAddress(BacnetAddressTypes.IP, data.Properties["Address"]);
+                BacnetAddress address = new BacnetAddress(BacnetAddressTypes.IP, data.Properties["Address"]);
                 string objectName = data.Properties["ObjectName"];
                 string objectInstance = data.Properties["ObjectInstance"];
 
@@ -77,7 +81,7 @@ namespace BacNetExtension.CustomLists
                 _client = new BacnetClient(transport);
                 _client.Start();
 
-                Dictionary<BacnetPropertyIds,CustomListColumnTypes> values = GetPropetiesWithTypes(adddress, objectName, objectInstance);
+                Dictionary<BacnetPropertyIds,CustomListColumnTypes> values = GetPropertiesWithTypes(address, objectName, objectInstance);
                 CustomListColumnCollection customListCollection = new CustomListColumnCollection();
 
                 foreach (var value in values)
@@ -87,7 +91,7 @@ namespace BacNetExtension.CustomLists
                     customListCollection.Add(new CustomListColumn(newName ?? oldName, value.Value));
                 }
 
-                if (values == null || values.Count <= 0)
+                if (values.Count <= 0)
                 {
                     customListCollection.Add(new CustomListColumn("Error see Log", CustomListColumnTypes.String));
                 }
@@ -108,7 +112,7 @@ namespace BacNetExtension.CustomLists
             try
             {
                 int tcpPort = int.Parse(data.Properties["Port"]);
-                BacnetAddress adddress = new BacnetAddress(BacnetAddressTypes.IP, data.Properties["Address"]);
+                BacnetAddress address = new BacnetAddress(BacnetAddressTypes.IP, data.Properties["Address"]);
                 string objectName = data.Properties["ObjectName"];
                 string objectInstance = data.Properties["ObjectInstance"];
 
@@ -116,7 +120,7 @@ namespace BacNetExtension.CustomLists
                 _client = new BacnetClient(transport);
                 _client.Start();
 
-                _oldValues = GetSupportedPropertiesWithValues(adddress, objectName, objectInstance);
+                _oldValues = GetSupportedPropertiesWithValues(address, objectName, objectInstance);
                 CustomListObjectElementCollection customListObjectColl = new CustomListObjectElementCollection();
                 CustomListObjectElement itemElement = new CustomListObjectElement();
                 List<string> added = new List<string>();
@@ -130,10 +134,10 @@ namespace BacNetExtension.CustomLists
 
                         if (newKey != null)
                         {
-                            var splitted = value.Value.Split(':');
-                            if (splitted.Length > 1)
+                            var propertyNameWithValue = value.Value.Split(':');
+                            if (propertyNameWithValue.Length > 1)
                             {
-                                itemElement.Add(newKey, splitted[1]);
+                                itemElement.Add(newKey, propertyNameWithValue[1]);
                                 added.Add(value.Key);
                             }
                             else
@@ -160,7 +164,7 @@ namespace BacNetExtension.CustomLists
         protected override CustomListExecuteReturnContext ExecuteFunctionOverride(CustomListData data, CustomListExecuteParameterContext context)
         {
             int tcpPort = int.Parse(data.Properties["Port"]);
-            BacnetAddress adddress = new BacnetAddress(BacnetAddressTypes.IP, data.Properties["Address"]);
+            BacnetAddress address = new BacnetAddress(BacnetAddressTypes.IP, data.Properties["Address"]);
             string objectName = data.Properties["ObjectName"];
             string objectInstance = data.Properties["ObjectInstance"];
             var transport = new BacnetIpUdpProtocolTransport(tcpPort);
@@ -172,9 +176,7 @@ namespace BacNetExtension.CustomLists
                 case "WriteData":
                     string propertyName = context.Values[0].StringValue;
                     string value = context.Values[1].StringValue;
-                    WriteProperty(adddress, objectName, objectInstance, propertyName, value);
-                    break;
-                default:
+                    WriteProperty(address, objectName, objectInstance, propertyName, value);
                     break;
             }
             return new CustomListExecuteReturnContext
@@ -186,6 +188,121 @@ namespace BacNetExtension.CustomLists
                 };
         }
 
+        protected override void SetupOverride(CustomListData data)
+        {
+            try
+            {
+                _listName = data.ListName;
+                if (bool.TryParse(data.Properties["SubscribeCOV"], out bool subscribeCOV))
+                {
+                    if (subscribeCOV)
+                    {
+                        if (int.TryParse(data.Properties["Port"], out int tcpPort))
+                        {
+                            BacnetAddress address =
+                                new BacnetAddress(BacnetAddressTypes.IP, data.Properties["Address"]);
+                            BacnetIpUdpProtocolTransport transport = new BacnetIpUdpProtocolTransport(tcpPort);
+                            _client = new BacnetClient(transport);
+                            _client.Start();
+                            _client.OnCOVNotification += HandleCovNotification;
+
+                            string objectName = data.Properties["ObjectName"];
+                            string objectInstance = data.Properties["ObjectInstance"];
+                            uint duration = 120;
+                            Task.Run(() =>
+                            {
+                                if (SubscribeCov(address, objectName, objectInstance, duration, _client))
+                                {
+                                    Log.Verbose("Successfully connected to COV");
+                                    Timer timer = new Timer(duration * 1000);
+                                    timer.Elapsed += (sender, e) =>
+                                    {
+                                        transport = new BacnetIpUdpProtocolTransport(tcpPort);
+                                        _client = new BacnetClient(transport);
+                                        _client.Start();
+                                        _client.OnCOVNotification += HandleCovNotification;
+                                        if (!SubscribeCov(address, objectName, objectInstance, duration, _client))
+                                        {
+                                            Log.Error("Failed to resubscribe after timer elapsed.");
+                                        }
+                                        else
+                                        {
+                                            Log.Verbose("Successfully connected to COV");
+                                        }
+                                    };
+                                    timer.AutoReset = true;
+                                    timer.Start();
+                                }
+                                else
+                                {
+                                    Log.Error("Failed to subscribe to COV.");
+                                }
+                            });
+                        }
+                        else
+                        {
+                            throw new FormatException("The value for 'Port' is not a valid integer.");
+                        }
+                    }
+                }
+                else
+                {
+                    throw new FormatException("The value for 'SubscribeCOV' is not a valid boolean.");
+                }
+            }
+            catch (Exception e)
+            {
+                Log.Error(e.ToString());
+            }
+        }
+        private void HandleCovNotification(BacnetClient sender, BacnetAddress address, byte invokeId, uint subscriberProcessIdentifier, BacnetObjectId initiatingDeviceIdentifier, BacnetObjectId monitoredObjectIdentifier, uint timeRemaining, bool needConfirm, ICollection<BacnetPropertyValue> values, BacnetMaxSegments maxSegments)
+        {
+            var itemElement = new CustomListObjectElement();
+            var added = new List<string>();
+
+            foreach (var value in _oldValues)
+            {
+                if (!added.Contains(value.Key))
+                {
+                    string oldKey = value.Key;
+                    string newKey = _bacnetPropertiesMap.FirstOrDefault(p => p.Value.ToString() == oldKey).Key;
+
+                    if (newKey != null)
+                    {
+                        var splitted = value.Value.Split(':');
+                        if (splitted.Length > 1)
+                        {
+                            itemElement.Add(newKey, splitted[1]);
+                            added.Add(value.Key);
+                        }
+                        else
+                        {
+                            itemElement.Add(newKey, value.Value);
+                            added.Add(value.Key);
+                        }
+                    }
+                    else
+                    {
+                        itemElement.Add(value.Key, value.Value);
+                        added.Add(value.Key);
+                    }
+                }
+            }
+
+            foreach (var bacnetPropertyValue in values)
+            {
+                if (values.Count == 1)
+                {
+                    string newKey = _bacnetPropertiesMap.FirstOrDefault(p => p.Value.ToString() == bacnetPropertyValue.ToString()).Key;
+                    itemElement[newKey] = bacnetPropertyValue.value[0].Value;
+                }
+            }
+            Data?.Push(_listName).Update(0, itemElement);
+            if (needConfirm)
+            {
+                sender.SimpleAckResponse(address, BacnetConfirmedServices.SERVICE_CONFIRMED_COV_NOTIFICATION, invokeId);
+            }
+        }
         private Dictionary<string, string> GetSupportedPropertiesWithValues(BacnetAddress address, string objectName, string instance)
         {
             var properties = new Dictionary<string, string>();
@@ -219,7 +336,7 @@ namespace BacNetExtension.CustomLists
             }
             return properties;
         }
-        public Dictionary<BacnetPropertyIds, CustomListColumnTypes> GetPropetiesWithTypes(BacnetAddress address, string objectName, string instance)
+        public Dictionary<BacnetPropertyIds, CustomListColumnTypes> GetPropertiesWithTypes(BacnetAddress address, string objectName, string instance)
         {
             var properties = new Dictionary<BacnetPropertyIds, CustomListColumnTypes>();
 
@@ -281,7 +398,7 @@ namespace BacNetExtension.CustomLists
             property.value.CopyTo(values, 0);
 
             if (values.Length == 1)
-                return values[0].Value?.ToString() ?? null;
+                return values[0].Value?.ToString();
             if (values.Length > 1)
             {
                 List<string> valesOfArray = new List<string>();
@@ -343,7 +460,7 @@ namespace BacNetExtension.CustomLists
                 else
                 {
                     object convertedValue = ConvertUserInput(value, tag);
-                    valueList = new BacnetValue[] { new BacnetValue(tag, convertedValue) };
+                    valueList = new [] { new BacnetValue(tag, convertedValue) };
                 }
                 bool result = _client.WritePropertyRequest(address, objectId, propertyId, valueList);
 
@@ -458,6 +575,17 @@ namespace BacNetExtension.CustomLists
 
             throw new Exception($"Invalid value for type {expectedType}: {userInput}");
         }
+        private bool SubscribeCov(BacnetAddress address, string objectName, string instance, uint duration, BacnetClient client)
+        {
+            if (!_bacnetObjectsMap.TryGetValue(objectName, out var type)) return false;
+            if (!uint.TryParse(instance, out var objectInstance)) return false;
+            if (address == null) return false;
 
+            bool cancel = duration == 0;
+
+            Log.Info($" type = {type}, instance = {objectInstance}, address = {address} cancel = {cancel}, duration = {duration} client = {client.Log} ");
+            return client.SubscribeCOVRequest(address, new BacnetObjectId(type, objectInstance), 0,
+                cancel, false, duration);
+        }
     }
 }
